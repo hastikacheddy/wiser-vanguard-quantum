@@ -1,0 +1,37 @@
+# ============================================================================
+# WISER Global Quantum+AI — Vanguard Challenge
+# OMEGA pipeline: ADMM-coordinated HRP + constraint-preserving QAOA+
+# ----------------------------------------------------------------------------
+# Modern Qiskit stack only (Primitives V2; no qiskit.aqua, no execute()):
+#   * qiskit >= 1.4    — circuits, transpiler, XXPlusYYGate, Primitives V2
+#   * qiskit-aer       — AerSimulator: noisy NISQ emulation for the ZNE
+#                        routine and matrix_product_state tensor-network
+#                        fallback for larger sub-problems
+# SciPy provides the entire HRP layer (hierarchy.linkage / dendrogram /
+# to_tree) and the graph machinery for the topology-matched tree mixer
+# (sparse.csgraph minimum_spanning_tree / breadth_first_order) — no
+# heuristic-ML dependencies (no sklearn) by design.
+# ============================================================================
+numpy>=1.26,<3
+scipy>=1.11
+pandas>=2.0
+
+# --- Quantum stack -----------------------------------------------------------
+qiskit>=1.4,<3
+qiskit-aer>=0.15
+qiskit-algorithms>=0.3     # COBYLA optimizer (SciPy fallback wired in)
+
+# --- Classical convex stack (ADMM x-update) ----------------------------------
+cvxpy>=1.4
+ecos>=2.0.12               # + ECOS_BB branch-and-bound classical fallback
+osqp>=0.6
+
+# --- Dashboard ----------------------------------------------------------------
+streamlit>=1.33
+plotly>=5.20
+
+# --- Competitor benchmark ONLY (adversarial baseline replication) -------------
+# scikit-learn is used exclusively by src/competitor_heuristic.py to run the
+# competitor's DBSCAN stack faithfully. The OMEGA pipeline itself remains
+# heuristic-ML-free by design.
+scikit-learn>=1.3

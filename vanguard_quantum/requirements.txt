@@ -1,0 +1,33 @@
+# ============================================================================
+# WISER Global Quantum+AI Program 2026 — Vanguard Challenge
+# Hybrid Penalty-Free Portfolio Construction Pipeline
+# ----------------------------------------------------------------------------
+# Pinned to the modern (non-deprecated) Qiskit stack:
+#   * qiskit >= 1.4      -> Primitives V2 (StatevectorSampler / Estimator),
+#                           no qiskit.aqua, no qiskit.execute.
+#   * qiskit-aer         -> AerSimulator(method="matrix_product_state") is the
+#                           tensor-network fallback that lets us sample the
+#                           N = 40 qubit XY-mixer ansatz on a laptop.
+#   * qiskit-algorithms  -> classical optimizers (COBYLA) for the variational
+#                           loop. A SciPy fallback is wired in if this package
+#                           is unavailable in the target environment.
+# ============================================================================
+numpy>=1.26,<3
+scipy>=1.11
+pandas>=2.0
+
+# --- Quantum stack (Primitives V2 era, NOT qiskit.aqua) ---------------------
+qiskit>=1.4,<3
+qiskit-aer>=0.15
+qiskit-algorithms>=0.3
+
+# --- Classical convex / mixed-integer stack ----------------------------------
+# cvxpy ships with Clarabel/SCS/OSQP; ECOS + ECOS_BB give us a branch-and-bound
+# MISOCP fallback for the exact MIQP baseline without a commercial license.
+cvxpy>=1.4
+ecos>=2.0.12
+osqp>=0.6
+
+# --- Dashboard ----------------------------------------------------------------
+streamlit>=1.33
+plotly>=5.20
