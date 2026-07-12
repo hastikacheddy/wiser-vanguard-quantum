@@ -90,7 +90,8 @@ from .quantum_z_step import ZStepResult, solve_z_update
 logger = logging.getLogger("omega.admm")
 
 __all__ = ["ADMMConfig", "ClusterSolution", "OmegaResult",
-           "solve_cluster", "allocate_cardinality", "solve_universe"]
+           "solve_cluster", "allocate_cardinality", "solve_universe",
+           "forecast_robustness_stress"]
 
 
 @dataclass
@@ -420,3 +421,73 @@ def solve_universe(
         income_floor_relaxed=polish.relaxed_income_floor,
         polish_messages=list(polish.messages),
     )
+
+
+def forecast_robustness_stress(
+    md,
+    plan: ClusterPlan,
+    k_total: int = 20,
+    w_max_global: float = 0.10,
+    config: ADMMConfig | None = None,
+    scenario_matrix: np.ndarray | None = None,
+    n_trials: int = 5,
+    noise_scale: float = 0.20,
+    seed: int = 123,
+):
+    """Guardrail robustness under forecast error: μ is an INPUT assumption
+    (per the challenge statement), so the defensible question is not "is μ
+    right?" but "what breaks when μ is wrong?".
+
+    Each trial perturbs expected returns multiplicatively,
+    :math:`\\mu' = \\mu \\odot (1 + \\eta\\,\\varepsilon)`,
+    :math:`\\varepsilon \\sim \\mathcal{N}(0, I)` (default η = 20%), re-runs
+    the full pipeline on the perturbed beliefs, then grades the resulting
+    book against the *unperturbed* assumptions.  Reported per trial:
+
+    * hard-guardrail breach count — the structural claim is that this stays
+      **0 for every trial**, because feasibility is enforced by symmetry
+      and convex constraints, never by the forecast;
+    * Sharpe under base assumptions — quantifies graceful quality decay;
+    * support overlap with the base book — selection stability.
+
+    Runs with ``quantum_last_n = 0`` (exact classical z-updates): the same
+    argmin at these cluster sizes, and robustness of the *pipeline
+    contract* is what is being measured, not sampler variance.
+    Returns a pandas DataFrame (trial 0 = unperturbed base).
+    """
+    import dataclasses
+
+    import pandas as pd
+
+    from .metrics import compute_metrics, constraint_breach_audit, total_breaches
+
+    config = config or ADMMConfig()
+    fast_cfg = dataclasses.replace(config, quantum_last_n=0)
+    rng = np.random.default_rng(seed)
+
+    def _grade(res, label):
+        m = compute_metrics(res.weights, md.mu, md.sigma, md.risk_free_rate,
+                            md.tc_linear, md.w_prev)
+        audit = constraint_breach_audit(
+            res.weights, k_target=k_total, w_max=w_max_global,
+            sectors=md.sectors, sector_cap=fast_cfg.sector_cap)
+        return {"trial": label,
+                "sharpe_under_base_mu": m["sharpe_net"],
+                "volatility": m["volatility"],
+                "hard_breaches": total_breaches(audit),
+                "positions": m["num_positions"]}
+
+    base = solve_universe(md, plan, k_total=k_total,
+                          w_max_global=w_max_global, config=fast_cfg,
+                          scenario_matrix=scenario_matrix)
+    rows = [dict(_grade(base, "base (unperturbed)"), support_overlap=1.0)]
+    for t in range(1, n_trials + 1):
+        mu_p = md.mu * (1.0 + noise_scale * rng.standard_normal(md.n_assets))
+        md_p = dataclasses.replace(md, mu=mu_p)
+        res = solve_universe(md_p, plan, k_total=k_total,
+                             w_max_global=w_max_global, config=fast_cfg,
+                             scenario_matrix=scenario_matrix)
+        overlap = float((res.support & base.support).sum()) / k_total
+        rows.append(dict(_grade(res, f"μ ± {noise_scale:.0%} #{t}"),
+                         support_overlap=overlap))
+    return pd.DataFrame(rows)

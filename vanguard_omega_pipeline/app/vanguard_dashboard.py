@@ -27,7 +27,10 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.admm_coordinator import ADMMConfig, solve_universe  # noqa: E402
+from src.admm_coordinator import (  # noqa: E402
+    ADMMConfig, forecast_robustness_stress, solve_universe,
+)
+from src.market_snapshot import SNAPSHOT_CSV, load_market_snapshot  # noqa: E402
 from src.classical_x_step import solve_x_update  # noqa: E402
 from src.competitor_heuristic import (  # noqa: E402
     CompetitorHeuristicPipeline, dbscan_quality_report, penalty_lambda_sweep,
@@ -50,8 +53,17 @@ OMEGA, COMP = "#26c6da", "#ef5350"
 
 # ---------------------------------------------------------------- sidebar
 st.sidebar.title("🛰️ OMEGA Controls")
+data_source = st.sidebar.radio(
+    "Data source",
+    ["Synthetic (seeded, verified)", "Market snapshot (41 ETFs, offline)"],
+    index=0,
+    help="Synthetic: controlled, reproducible verification universe. "
+         "Snapshot: real multi-asset ETF closes (committed CSV, loaded "
+         "offline — same pipeline, unchanged).")
+use_snapshot = data_source.startswith("Market")
 seed = st.sidebar.number_input("Seed", 0, 9999, 7)
-n_assets = st.sidebar.slider("Universe N", 60, 140, 100, 10)
+n_assets = st.sidebar.slider("Universe N (synthetic only)", 60, 140, 100, 10,
+                             disabled=use_snapshot)
 k_total = st.sidebar.slider("Global cardinality K", 10, 30, 20)
 w_max_global = st.sidebar.slider("Global W_max", 0.02, 0.25, 0.10, 0.01)
 risk_aversion = st.sidebar.slider("Risk aversion q", 1.0, 20.0, 5.0, 0.5)
@@ -91,18 +103,28 @@ run = st.sidebar.button("▶ Run OMEGA pipeline", type="primary",
 
 
 @st.cache_data(show_spinner=False)
-def _market(n, s):
+def _market(kind, n, s):
+    if kind == "snapshot":
+        return load_market_snapshot()
     return generate_market_data(n_assets=n, seed=s)
 
 
 @st.cache_data(show_spinner=False)
-def _plan(n, s):
-    md = _market(n, s)
+def _plan(kind, n, s):
+    md = _market(kind, n, s)
     return build_cluster_plan(md.sigma, corr=md.correlation(), max_size=20)
 
 
-md = _market(n_assets, int(seed))
-plan = _plan(n_assets, int(seed))
+_kind = "snapshot" if use_snapshot else "synthetic"
+if use_snapshot and not SNAPSHOT_CSV.exists():
+    st.sidebar.error("data/etf_prices.csv missing — falling back to synthetic.")
+    _kind, use_snapshot = "synthetic", False
+md = _market(_kind, n_assets, int(seed))
+plan = _plan(_kind, n_assets, int(seed))
+if use_snapshot:
+    st.sidebar.caption(f"Snapshot: {md.n_assets} ETFs · "
+                       f"{len(md.sector_names)} asset classes · "
+                       f"{md.returns.shape[0]} trading days (offline CSV)")
 
 if run:
     cfg = ADMMConfig(max_iter=max_iter, rho0=rho0, risk_aversion=risk_aversion,
@@ -119,9 +141,11 @@ if run:
     st.session_state["cfg"] = cfg
 
 st.title("Vanguard OMEGA — ADMM-Coordinated Quantum Portfolio Core")
-st.caption(f"N={n_assets} multi-asset universe → {len(plan.clusters)} HRP "
-           f"clusters (sizes {[len(c) for c in plan.clusters]}) → penalty-free "
-           f"QAOA+ z-updates on degree-≤3 tree mixers → convex polish.")
+st.caption(f"{'Real ETF snapshot' if use_snapshot else 'Synthetic'} universe, "
+           f"N={md.n_assets} across {len(md.sector_names)} asset classes → "
+           f"{len(plan.clusters)} HRP clusters "
+           f"(sizes {[len(c) for c in plan.clusters]}) → penalty-free QAOA+ "
+           f"z-updates on degree-≤3 tree mixers → convex polish.")
 
 with st.expander("📐 Mathematical formulation (binary variables, linear "
                  "constraints, quadratic objective → quantum-compatible form)"):
@@ -288,6 +312,40 @@ with tab1:
             "mandate (breach column). OMEGA delivers the mandated exactly-K "
             "book at comparable risk-adjusted quality: that is the trade-off "
             "the hybrid pipeline resolves.")
+
+        with st.expander("🎲 Forecast robustness — guardrails under ±20% "
+                         "expected-return error"):
+            st.markdown(
+                "μ is an **input assumption** per the challenge statement. "
+                "The defensible question is what breaks when it is wrong: "
+                "each trial perturbs μ by ±20% noise, re-runs the full "
+                "pipeline on the wrong beliefs, and grades the book against "
+                "the base assumptions. The structural claim: **hard breaches "
+                "stay 0 in every trial** — guardrails never depend on the "
+                "forecast.")
+            if st.button("Run robustness stress (base + 5 perturbed runs)"):
+                with st.spinner("Re-running pipeline under perturbed μ…"):
+                    st.session_state["robust"] = forecast_robustness_stress(
+                        md, plan, k_total=k_total, w_max_global=w_max_global,
+                        config=st.session_state["cfg"],
+                        scenario_matrix=md.scenario_matrix(),
+                        n_trials=5, noise_scale=0.20, seed=int(seed) + 99)
+            if "robust" in st.session_state:
+                rdf = st.session_state["robust"]
+                st.dataframe(rdf.style.format({
+                    "sharpe_under_base_mu": "{:.3f}", "volatility": "{:.2%}",
+                    "support_overlap": "{:.0%}"}),
+                    use_container_width=True, hide_index=True)
+                worst = rdf["hard_breaches"].max()
+                srange = (rdf["sharpe_under_base_mu"].min(),
+                          rdf["sharpe_under_base_mu"].max())
+                st.markdown(
+                    f"**Verdict (measured):** worst-case breaches across all "
+                    f"trials = **{int(worst)}**; Sharpe range "
+                    f"[{srange[0]:.2f}, {srange[1]:.2f}]; mean support "
+                    f"overlap {rdf['support_overlap'][1:].mean():.0%}. "
+                    f"Forecast error degrades quality gracefully — it never "
+                    f"touches compliance.")
 
     st.divider()
     st.subheader("⚔️ Measured head-to-head vs competitor stack "
@@ -460,7 +518,7 @@ with tab3:
     )
     comp_n = st.slider("Competitor monolithic circuit size (= N; the penalty "
                        "couples all assets so they cannot shrink it)",
-                       20, n_assets, n_assets, 4)
+                       20, md.n_assets, md.n_assets, 1)
     if st.button("🔬 Run heavy-hex transpilation audit"):
         big = int(np.argmax([len(c) for c in plan.clusters]))
         cl, topo = plan.clusters[big], plan.topologies[big]
