@@ -65,6 +65,7 @@ class XStepResult:
     status: str
     solver: str
     elapsed_s: float
+    relaxed_income_floor: bool = False
     messages: list[str] = field(default_factory=list)
 
 
@@ -101,6 +102,11 @@ def solve_x_update(
     sector_cap: float | None = None,
     gate_to_support: bool = False,
     x_min: float = 0.0,
+    yields: np.ndarray | None = None,
+    income_floor: float | None = None,
+    scenario_matrix: np.ndarray | None = None,
+    cvar_weight: float = 0.0,
+    cvar_alpha: float = 0.15,
 ) -> XStepResult:
     """One scaled-form ADMM x-update on a cluster (see module docstring).
 
@@ -126,6 +132,25 @@ def solve_x_update(
         only with ``gate_to_support``).  An "exactly K names" mandate needs
         this floor: without it the convex optimum may legally zero a
         selected asset, silently shrinking the held cardinality.
+    yields, income_floor : INCOME goal — enforces
+        :math:`y^{\\top} x \\ge \\text{floor} \\cdot b_c` (budget-scaled).
+        If the floor is unattainable on the given support, the solve is
+        retried without it and flagged ``relaxed_income_floor`` (graceful
+        degradation, surfaced by the dashboard — never a silent drop).
+    scenario_matrix, cvar_weight, cvar_alpha : DRAWDOWN-CONTROL goal via a
+        convex scenario penalty (Rockafellar–Uryasev, J. Risk 2000).  With
+        scenario returns :math:`R \\in \\mathbb{R}^{S \\times N}` and losses
+        :math:`L_s = -(Rx)_s`, the objective gains
+
+        .. math::
+
+            w_{cvar} \\cdot \\mathrm{CVaR}_{\\alpha}(L) =
+            w_{cvar}\\Big(\\zeta + \\tfrac{1}{\\alpha S}
+            \\sum_s \\max(L_s - \\zeta, 0)\\Big)
+
+        (auxiliary :math:`\\zeta`, hinge via nonneg slack) — the expected
+        loss in the worst α-tail of scenarios, the standard convex
+        instrument for tail/drawdown control.  ``cvar_weight = 0`` disables.
 
     Returns
     -------
@@ -166,13 +191,36 @@ def solve_x_update(
         objective = objective + tc_linear @ cp.abs(x - np.asarray(w_prev))
     if rho > 0:
         objective = objective + (rho / 2.0) * cp.sum_squares(x - alpha * z + u)
+    if scenario_matrix is not None and cvar_weight > 0:
+        S = scenario_matrix.shape[0]
+        if scenario_matrix.shape[1] != n:
+            raise ValueError(f"scenario_matrix {scenario_matrix.shape} vs n={n}")
+        zeta = cp.Variable()
+        slack = cp.Variable(S, nonneg=True)
+        constraints.append(slack >= -(scenario_matrix @ x) - zeta)
+        objective = objective + cvar_weight * (
+            zeta + cp.sum(slack) / (cvar_alpha * S))
+
+    income_con = None
+    if yields is not None and income_floor is not None and income_floor > 0:
+        income_con = np.asarray(yields) @ x >= income_floor * budget
+        constraints.append(income_con)
 
     t0 = time.perf_counter()
+    relaxed_income = False
     problem = cp.Problem(cp.Minimize(objective), constraints)
     solver, status = _solve_chain(problem)
+    if solver == "none" and income_con is not None:
+        # Graceful degradation: drop the income floor, keep every hard
+        # guardrail, and flag the relaxation for the dashboard.
+        messages.append(
+            f"Income floor {income_floor:.2%} unattainable on this support — "
+            f"relaxed (all hard guardrails still enforced).")
+        relaxed_income = True
+        constraints = [c for c in constraints if c is not income_con]
+        problem = cp.Problem(cp.Minimize(objective), constraints)
+        solver, status = _solve_chain(problem)
     if solver == "none":
-        # Budget-proportional sector caps can bind against an adversarial
-        # support; retry once without the ADMM anchor to localize the cause.
         raise RuntimeError(
             f"x-update infeasible (status={status}) — check sector caps "
             f"({sector_cap}) and box ({x_max}) against budget {budget:.4f}."
@@ -181,5 +229,6 @@ def solve_x_update(
     x_val[x_val < 1e-12] = 0.0
     return XStepResult(
         x=x_val, objective=float(problem.value), status=status,
-        solver=solver, elapsed_s=time.perf_counter() - t0, messages=messages,
+        solver=solver, elapsed_s=time.perf_counter() - t0,
+        relaxed_income_floor=relaxed_income, messages=messages,
     )

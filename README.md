@@ -4,6 +4,12 @@ Two hybrid quantum-classical portfolio construction pipelines built for the
 Vanguard Challenge, both strictly penalty-free (no QUBO cardinality
 penalties — feasibility is enforced by circuit symmetry).
 
+**Challenge deliverables:** consolidated mathematical formulation in
+[FORMULATION.md](FORMULATION.md) · competition deck in
+[presentation/WISER_Vanguard_OMEGA.pptx](presentation/WISER_Vanguard_OMEGA.pptx)
+(PDF alongside) · tunable investor goals (growth / income / drawdown control /
+cost sensitivity) live in the OMEGA dashboard sidebar.
+
 ## Projects
 
 ### [vanguard_quantum](vanguard_quantum/) — 2-Phase Hybrid Pipeline

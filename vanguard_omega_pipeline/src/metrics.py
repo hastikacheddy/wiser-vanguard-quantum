@@ -48,6 +48,8 @@ from qiskit.transpiler import CouplingMap
 
 __all__ = [
     "compute_metrics",
+    "max_drawdown",
+    "scenario_cvar",
     "ConstraintBreach",
     "constraint_breach_audit",
     "heavy_hex_distance_for",
@@ -67,13 +69,18 @@ def compute_metrics(
     risk_free_rate: float = 0.03,
     tc_linear: np.ndarray | None = None,
     w_prev: np.ndarray | None = None,
+    yields: np.ndarray | None = None,
 ) -> dict:
     """Exact annualized portfolio analytics; net-of-cost figures included
-    when ``tc_linear``/``w_prev`` are supplied (Sharpe uses net return)."""
+    when ``tc_linear``/``w_prev`` are supplied (Sharpe uses net return).
+    ``turnover`` = ‖w − w_prev‖₁ (two-sided) and ``portfolio_yield`` = y'w
+    are reported when their inputs are available."""
     w = np.asarray(w, dtype=float).ravel()
     variance = float(w @ sigma @ w)
     vol = float(np.sqrt(max(variance, 0.0)))
     gross = float(mu @ w)
+    turnover = (float(np.abs(w - np.asarray(w_prev)).sum())
+                if w_prev is not None else np.nan)
     tcost = (float(np.asarray(tc_linear) @ np.abs(w - np.asarray(w_prev)))
              if tc_linear is not None and w_prev is not None else 0.0)
     net = gross - tcost
@@ -81,6 +88,9 @@ def compute_metrics(
         "expected_return_gross": gross,
         "transaction_cost": tcost,
         "expected_return_net": net,
+        "turnover": turnover,
+        "portfolio_yield": (float(np.asarray(yields) @ w)
+                            if yields is not None else np.nan),
         "volatility": vol,
         "variance": variance,
         "sharpe_net": (net - risk_free_rate) / vol if vol > 1e-12 else 0.0,
@@ -88,6 +98,27 @@ def compute_metrics(
         "num_positions": int((w > 1e-8).sum()),
         "max_weight": float(w.max(initial=0.0)),
     }
+
+
+def max_drawdown(w: np.ndarray, returns_panel: np.ndarray) -> float:
+    """Maximum peak-to-trough drawdown of the portfolio over the simulated
+    daily path:  MDD = max_t (1 − V_t / max_{s≤t} V_s),
+    V_t = ∏(1 + r_s'w).  The DRAWDOWN-CONTROL goal is optimized via the
+    convex CVaR proxy (drawdown itself is nonconvex); this measures the
+    realized outcome of that control on the path."""
+    port = returns_panel @ np.asarray(w, dtype=float).ravel()
+    curve = np.cumprod(1.0 + port)
+    peaks = np.maximum.accumulate(curve)
+    return float((1.0 - curve / peaks).max(initial=0.0))
+
+
+def scenario_cvar(w: np.ndarray, scenario_matrix: np.ndarray,
+                  alpha: float = 0.15) -> float:
+    """Realized CVaR_α of scenario losses −Rw: the mean loss over the worst
+    ⌈αS⌉ scenarios (the exact quantity the allocation-layer penalty bounds)."""
+    losses = -(scenario_matrix @ np.asarray(w, dtype=float).ravel())
+    k = max(1, int(np.ceil(alpha * len(losses))))
+    return float(np.sort(losses)[-k:].mean())
 
 
 @dataclass
@@ -106,6 +137,8 @@ def constraint_breach_audit(
     w_max: float | None = None,
     sectors: np.ndarray | None = None,
     sector_cap: float | None = None,
+    yields: np.ndarray | None = None,
+    income_floor: float | None = None,
     tol: float = 1e-6,
     position_tol: float = 1e-6,
 ) -> list[ConstraintBreach]:
@@ -132,8 +165,12 @@ def constraint_breach_audit(
             v = float(w[sectors == g].sum())
             if v > worst_v:
                 worst_g, worst_v = int(g), v
-        out.append(ConstraintBreach("Sector cap (worst)", worst_v, sector_cap,
-                                    worst_v <= sector_cap + tol, f"sector {worst_g}"))
+        out.append(ConstraintBreach("Asset-class cap (worst)", worst_v, sector_cap,
+                                    worst_v <= sector_cap + tol, f"class {worst_g}"))
+    if yields is not None and income_floor is not None and income_floor > 0:
+        y = float(np.asarray(yields) @ w)
+        out.append(ConstraintBreach("Income floor y'w ≥ floor", y, income_floor,
+                                    y >= income_floor - 1e-6))
     return out
 
 

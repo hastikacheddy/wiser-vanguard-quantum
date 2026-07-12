@@ -106,10 +106,18 @@ class ADMMConfig:
     eps_rel: float = 1e-3
     risk_aversion: float = 5.0          # q in the discrete MV term
     mv_weight: float = 1.0              # w_mv scaling of the discrete term
-    return_weight: float = 1.0          # λ_ret in the continuous term
+    return_weight: float = 1.0          # GROWTH goal: λ_ret weight
     box_multiple: float = 2.0           # x_max = box_multiple · b_c / K_c
-    sector_cap: float | None = 0.60     # budget-proportional per cluster
+    sector_cap: float | None = 0.60     # asset-class cap (global polish)
     use_tcosts: bool = True
+    # --- Investor goals (challenge: growth / income / drawdown / cost). ----
+    # Growth = return_weight above; the three below act on the continuous
+    # capital layer (the polish QP), where they are convex — the discrete
+    # selection layer stays a pure risk-return backbone.
+    income_floor: float | None = None   # INCOME: y'w ≥ floor (graceful relax)
+    cvar_weight: float = 0.0            # DRAWDOWN CONTROL: CVaR penalty wt
+    cvar_alpha: float = 0.15            # tail fraction for CVaR
+    cost_multiplier: float = 1.0        # COST SENSITIVITY: scales t-costs
     # --- quantum z-update knobs -------------------------------------------
     reps: int = 1
     shots: int = 1024
@@ -322,6 +330,8 @@ class OmegaResult:
     cluster_solutions: list[ClusterSolution]
     polish_status: str
     elapsed_s: float
+    income_floor_relaxed: bool = False
+    polish_messages: list[str] = field(default_factory=list)
 
     @property
     def total_fallbacks(self) -> int:
@@ -335,6 +345,7 @@ def solve_universe(
     w_max_global: float = 0.10,
     w_min_global: float = 0.01,
     config: ADMMConfig | None = None,
+    scenario_matrix: np.ndarray | None = None,
 ) -> OmegaResult:
     """Full pipeline: cardinality split → per-cluster ADMM → global polish.
 
@@ -369,7 +380,8 @@ def solve_universe(
             cluster_id=c_id, asset_idx=cl, mu_c=md.mu[cl],
             sigma_c=md.sigma[np.ix_(cl, cl)], k_c=k_c, budget=float(b_c),
             topology=topo, config=config,
-            tc_linear=md.tc_linear[cl], w_prev=md.w_prev[cl],
+            tc_linear=md.tc_linear[cl] * config.cost_multiplier,
+            w_prev=md.w_prev[cl],
             sectors_c=None, z_warm=z_warm,
         )
         logger.info("cluster %d: %d iters, converged=%s, fallbacks=%d",
@@ -387,16 +399,24 @@ def solve_universe(
         z=support, u=np.zeros(n), rho=0.0, mu=md.mu, sigma=md.sigma,
         budget=1.0, alpha=1.0 / k_total, x_max=w_max_global,
         return_weight=config.return_weight,
-        tc_linear=md.tc_linear if config.use_tcosts else None,
+        tc_linear=(md.tc_linear * config.cost_multiplier
+                   if config.use_tcosts else None),
         w_prev=md.w_prev if config.use_tcosts else None,
         sectors=md.sectors,
         sector_cap=config.sector_cap,
         gate_to_support=True,
         x_min=w_min_global,
+        yields=getattr(md, "asset_yields", None),
+        income_floor=config.income_floor,
+        scenario_matrix=scenario_matrix,
+        cvar_weight=config.cvar_weight,
+        cvar_alpha=config.cvar_alpha,
     )
     weights = polish.x / polish.x.sum()
     return OmegaResult(
         weights=weights, support=support, k_total=k_total,
         cluster_solutions=solutions, polish_status=polish.status,
         elapsed_s=time.perf_counter() - t0,
+        income_floor_relaxed=polish.relaxed_income_floor,
+        polish_messages=list(polish.messages),
     )

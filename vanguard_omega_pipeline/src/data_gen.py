@@ -52,10 +52,22 @@ __all__ = ["OmegaMarketData", "generate_market_data", "TRADING_DAYS_PER_YEAR"]
 
 TRADING_DAYS_PER_YEAR = 252
 
+# Multi-asset universe: labels are ASSET CLASSES (equities, fixed income,
+# commodities, alternatives, FX), per the challenge's multi-asset mandate.
+# The variable name `sectors` is retained across the API for stability —
+# read it as "asset-class label".
 _SECTOR_POOL = [
-    "Technology", "Financials", "Healthcare", "Energy", "Consumer",
-    "Industrials", "Utilities", "Materials", "Real Estate", "Telecom",
-    "Transport", "Media",
+    "US Equity", "Intl Equity", "EM Equity", "Govt Bonds",
+    "Corp Bonds", "High Yield", "Commodities", "REITs",
+    "Infrastructure", "Private Alts", "FX Overlay", "Cash Equiv",
+]
+
+# Base annual income yield per asset class (dividends / coupons / carry),
+# aligned index-wise with _SECTOR_POOL. Bonds, high yield and REITs carry
+# income; commodities and FX overlays carry essentially none.
+_CLASS_BASE_YIELD = [
+    0.018, 0.024, 0.028, 0.033, 0.042, 0.065, 0.004, 0.046,
+    0.038, 0.012, 0.006, 0.035,
 ]
 
 
@@ -76,6 +88,8 @@ class OmegaMarketData:
     w_prev : (N,) previous portfolio (sums to 1; sparse) for turnover terms.
     tc_linear : (N,) linear transaction-cost coefficients c_i (annualized
         drag per unit of |Δweight|; ~5–40 bps).
+    asset_yields : (N,) annual income yield y_i (dividends/coupons/carry) —
+        drives the INCOME goal (:math:`y^{\\top}w \\ge` income floor).
     risk_free_rate : annualized r_f.
     seed : RNG seed used (provenance).
     """
@@ -89,6 +103,7 @@ class OmegaMarketData:
     asset_names: list[str]
     w_prev: np.ndarray
     tc_linear: np.ndarray
+    asset_yields: np.ndarray
     risk_free_rate: float
     seed: int
 
@@ -101,7 +116,7 @@ class OmegaMarketData:
         assert self.sigma.shape == (n, n), f"sigma {self.sigma.shape} != ({n},{n})"
         assert self.returns.ndim == 2 and self.returns.shape[1] == n, \
             f"returns panel {self.returns.shape} incompatible with N={n}"
-        for name in ("sectors", "industries", "w_prev", "tc_linear"):
+        for name in ("sectors", "industries", "w_prev", "tc_linear", "asset_yields"):
             arr = getattr(self, name)
             assert arr.shape == (n,), f"{name} {arr.shape} != ({n},)"
         assert np.allclose(self.sigma, self.sigma.T, atol=1e-12), "sigma not symmetric"
@@ -124,6 +139,23 @@ class OmegaMarketData:
         corr = self.sigma / np.outer(vol, vol)
         np.fill_diagonal(corr, 1.0)
         return np.clip(corr, -1.0, 1.0)
+
+    def scenario_matrix(self, horizon_days: int = 21) -> np.ndarray:
+        """Stress-scenario return matrix R ∈ R^{S×N} for scenario penalties.
+
+        Chops the simulated daily panel into non-overlapping ``horizon_days``
+        windows (≈ monthly) and compounds each into one scenario:
+        :math:`R_{s,i} = \\prod_{t \\in s}(1 + r_{t,i}) - 1`.  The allocation
+        layer's CVaR penalty (drawdown-control goal) operates on portfolio
+        losses :math:`-R w` over these scenarios — the standard convex
+        instrument for tail/drawdown control (Rockafellar & Uryasev, 2000).
+        """
+        n_windows = self.returns.shape[0] // horizon_days
+        if n_windows < 5:
+            raise ValueError("panel too short for scenario construction")
+        r = self.returns[: n_windows * horizon_days]
+        r = r.reshape(n_windows, horizon_days, self.n_assets)
+        return np.prod(1.0 + r, axis=1) - 1.0
 
 
 def generate_market_data(
@@ -204,11 +236,17 @@ def generate_market_data(
     w_prev[prev_idx] = rng.dirichlet(np.ones(k_prev) * 2.0)
     tc_linear = rng.uniform(0.0005, 0.0040, n_assets)
 
+    # --- Income yields (drawn LAST so every previously verified field is
+    # bit-identical to earlier releases for the same seed). ----------------
+    base_y = np.asarray(_CLASS_BASE_YIELD[:n_sectors])
+    asset_yields = np.clip(
+        base_y[sectors] * rng.uniform(0.7, 1.3, n_assets), 0.0, 0.12)
+
     return OmegaMarketData(
         mu=mu, sigma=sigma, returns=returns, sectors=sectors,
         industries=industries, sector_names=sector_names,
         asset_names=asset_names, w_prev=w_prev, tc_linear=tc_linear,
-        risk_free_rate=risk_free_rate, seed=seed,
+        asset_yields=asset_yields, risk_free_rate=risk_free_rate, seed=seed,
     )
 
 

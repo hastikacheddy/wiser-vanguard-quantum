@@ -36,7 +36,8 @@ from src.data_gen import generate_market_data  # noqa: E402
 from src.hrp_clustering import build_cluster_plan, cluster_report  # noqa: E402
 from src.metrics import (  # noqa: E402
     benchmark_table, compute_metrics, constraint_breach_audit,
-    heavy_hex_transpile_audit, penalty_scale_audit, total_breaches,
+    heavy_hex_transpile_audit, max_drawdown, penalty_scale_audit,
+    scenario_cvar, total_breaches,
 )
 from src.quantum_z_step import (  # noqa: E402
     build_tree_qaoa_ansatz, classical_z_exact, qubo_to_ising, solve_z_update,
@@ -54,6 +55,23 @@ n_assets = st.sidebar.slider("Universe N", 60, 140, 100, 10)
 k_total = st.sidebar.slider("Global cardinality K", 10, 30, 20)
 w_max_global = st.sidebar.slider("Global W_max", 0.02, 0.25, 0.10, 0.01)
 risk_aversion = st.sidebar.slider("Risk aversion q", 1.0, 20.0, 5.0, 0.5)
+
+st.sidebar.subheader("🎯 Investor goals")
+goal_growth = st.sidebar.slider(
+    "Growth (return emphasis λ_ret)", 0.0, 3.0, 1.0, 0.25,
+    help="Weight on expected return vs risk in both layers.")
+goal_income = st.sidebar.slider(
+    "Income floor y'w (annual)", 0.0, 0.05, 0.0, 0.005,
+    help="Minimum portfolio yield from dividends/coupons/carry. "
+         "0 = off. Gracefully relaxed (and flagged) if unattainable.")
+goal_drawdown = st.sidebar.slider(
+    "Drawdown control (CVaR penalty)", 0.0, 25.0, 0.0, 1.0,
+    help="Penalty on the expected loss in the worst 15% of monthly stress "
+         "scenarios (Rockafellar–Uryasev). 0 = off.")
+goal_cost = st.sidebar.slider(
+    "Cost sensitivity (t-cost ×)", 0.0, 5.0, 1.0, 0.5,
+    help="Multiplier on per-asset transaction costs — higher = the "
+         "optimizer avoids trading away from the previous book.")
 
 st.sidebar.subheader("ADMM coordinator")
 max_iter = st.sidebar.slider("Max iterations", 3, 15, 8)
@@ -89,17 +107,63 @@ plan = _plan(n_assets, int(seed))
 if run:
     cfg = ADMMConfig(max_iter=max_iter, rho0=rho0, risk_aversion=risk_aversion,
                      reps=reps, shots=int(shots), cobyla_maxiter=cobyla_maxiter,
-                     quantum_last_n=quantum_last_n, seed=int(seed))
+                     quantum_last_n=quantum_last_n, seed=int(seed),
+                     return_weight=goal_growth,
+                     income_floor=goal_income if goal_income > 0 else None,
+                     cvar_weight=goal_drawdown, cost_multiplier=goal_cost)
     with st.spinner(f"ADMM over {len(plan.clusters)} HRP clusters "
                     f"(x → z → u, adaptive ρ)…"):
         st.session_state["omega"] = solve_universe(
-            md, plan, k_total=k_total, w_max_global=w_max_global, config=cfg)
+            md, plan, k_total=k_total, w_max_global=w_max_global, config=cfg,
+            scenario_matrix=md.scenario_matrix())
     st.session_state["cfg"] = cfg
 
 st.title("Vanguard OMEGA — ADMM-Coordinated Quantum Portfolio Core")
-st.caption(f"N={n_assets} universe → {len(plan.clusters)} HRP clusters "
-           f"(sizes {[len(c) for c in plan.clusters]}) → penalty-free QAOA+ "
-           f"z-updates on degree-≤3 tree mixers → convex polish.")
+st.caption(f"N={n_assets} multi-asset universe → {len(plan.clusters)} HRP "
+           f"clusters (sizes {[len(c) for c in plan.clusters]}) → penalty-free "
+           f"QAOA+ z-updates on degree-≤3 tree mixers → convex polish.")
+
+with st.expander("📐 Mathematical formulation (binary variables, linear "
+                 "constraints, quadratic objective → quantum-compatible form)"):
+    st.markdown("**Master problem** — binary selection z, continuous weights w:")
+    st.latex(r"""
+        \min_{w \in \mathbb{R}^N,\; z \in \{0,1\}^N}\;\;
+        \underbrace{w^{\top}\Sigma w}_{\text{quadratic risk}}
+        \;-\; \lambda_{ret}\,\mu^{\top}w
+        \;+\; c_{tc}^{\top}|w - w_{prev}|
+        \;+\; w_{cvar}\,\mathrm{CVaR}_{\alpha}(-Rw)
+    """)
+    st.latex(r"""
+        \text{s.t.}\;\;
+        \mathbf{1}^{\top}w = 1,\;\;
+        0 \le w \le W_{max} z,\;\;
+        \mathbf{1}^{\top}z = K,\;\;
+        S_{class}\, w \le c_{cap},\;\;
+        y^{\top}w \ge y_{floor}
+    """)
+    st.markdown(
+        "**Quantum-compatible derivation** (selection layer, per HRP "
+        "cluster): substituting $z_i = (1-Z_i)/2$ maps the binary quadratic "
+        "form to a 2-local Ising Hamiltonian — **with no penalty term**, "
+        "because $\\mathbf{1}^\\top z = K$ is enforced by symmetry:")
+    st.latex(r"""
+        f(z) = q\,z^{\top}\Sigma z - \mu^{\top}z + a_{ADMM}^{\top}z
+        \;\;\longrightarrow\;\;
+        H_C = \sum_i h_i Z_i + \sum_{i<j} J_{ij} Z_i Z_j,\;\;
+        J_{ij} = \tfrac{q}{2}\Sigma_{ij}
+    """)
+    st.latex(r"""
+        [\,e^{-i\beta(X_iX_j+Y_iY_j)/2},\ \textstyle\sum_i \tfrac{I-Z_i}{2}\,]=0
+        \;\Rightarrow\;
+        |\psi(\gamma,\beta)\rangle \in \mathrm{span}\{|z\rangle : |z|=K\}
+        \;\;\forall \gamma,\beta
+    """)
+    st.markdown(
+        "The ADMM anchor $\\tfrac{\\rho}{2}\\|x+u-\\alpha z\\|^2$ is *linear* "
+        "in z (since $z_i^2 = z_i$) and folds into $h_i$ at zero circuit "
+        "cost. The nonconvex master problem is split: the $\\binom{N}{K}$ "
+        "combinatorics go to the quantum layer, everything continuous stays "
+        "a certifiable convex QP. Full derivations: FORMULATION.md.")
 
 tab1, tab2, tab3 = st.tabs(["💼 Allocation", "📉 ADMM Convergence",
                             "🔩 Hardware Audit"])
@@ -112,11 +176,18 @@ with tab1:
         st.info("Press **Run OMEGA pipeline** to execute the full stack.")
     else:
         res = st.session_state["omega"]
+        cfg_used = st.session_state["cfg"]
         m = compute_metrics(res.weights, md.mu, md.sigma, md.risk_free_rate,
-                            md.tc_linear, md.w_prev)
-        audit = constraint_breach_audit(res.weights, k_target=k_total,
-                                        w_max=w_max_global, sectors=md.sectors,
-                                        sector_cap=st.session_state["cfg"].sector_cap)
+                            md.tc_linear, md.w_prev, yields=md.asset_yields)
+        audit = constraint_breach_audit(
+            res.weights, k_target=k_total, w_max=w_max_global,
+            sectors=md.sectors, sector_cap=cfg_used.sector_cap,
+            yields=md.asset_yields,
+            income_floor=(None if res.income_floor_relaxed
+                          else cfg_used.income_floor))
+        if res.income_floor_relaxed:
+            st.warning(" ".join(res.polish_messages) or
+                       "Income floor relaxed (unattainable on this support).")
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Sharpe (net of t-costs)", f"{m['sharpe_net']:.2f}")
         c2.metric("Net return", f"{m['expected_return_net']:.2%}",
@@ -126,6 +197,19 @@ with tab1:
         c4.metric("Hard-guardrail breaches", total_breaches(audit))
         c5.metric("Quantum fallbacks used", res.total_fallbacks,
                   help="Classical fail-safe activations across all z-updates")
+        g1, g2, g3, g4 = st.columns(4)
+        g1.metric("Turnover ‖Δw‖₁", f"{m['turnover']:.2f}",
+                  help="Two-sided; cost-sensitivity goal drives this down")
+        g2.metric("Portfolio yield", f"{m['portfolio_yield']:.2%}",
+                  help="Income goal: y'w vs the configured floor")
+        g3.metric("Max drawdown (sim path)",
+                  f"{max_drawdown(res.weights, md.returns):.2%}",
+                  help="Realized on the simulated daily path; controlled "
+                       "via the convex CVaR scenario penalty")
+        g4.metric("Scenario CVaR (worst 15%)",
+                  f"{scenario_cvar(res.weights, md.scenario_matrix()):.2%}",
+                  help="Mean loss over the worst 15% of monthly scenarios — "
+                       "the exact quantity the drawdown-control goal penalizes")
 
         # Weights by cluster.
         cluster_of = np.full(md.n_assets, -1)
@@ -161,6 +245,49 @@ with tab1:
         rep["z_methods"] = [",".join(cs.z_methods[-2:]) for cs in res.cluster_solutions]
         with st.expander("Per-cluster decomposition detail"):
             st.dataframe(rep, use_container_width=True, hide_index=True)
+
+        st.subheader("Trade-offs vs classical HRP baseline")
+        m_hrp = compute_metrics(plan.hrp_benchmark_weights, md.mu, md.sigma,
+                                md.risk_free_rate, md.tc_linear, md.w_prev,
+                                yields=md.asset_yields)
+        audit_hrp = constraint_breach_audit(
+            plan.hrp_benchmark_weights, k_target=k_total, w_max=w_max_global,
+            sectors=md.sectors, sector_cap=cfg_used.sector_cap)
+        cmp_df = pd.DataFrame({
+            "OMEGA (quantum-selected, polished)": {
+                "Sharpe (net)": m["sharpe_net"],
+                "Net return": m["expected_return_net"],
+                "Volatility": m["volatility"],
+                "Turnover": m["turnover"],
+                "Yield": m["portfolio_yield"],
+                "Max drawdown (sim)": max_drawdown(res.weights, md.returns),
+                "# positions": m["num_positions"],
+                "Hard breaches vs mandate": total_breaches(audit),
+            },
+            "Classical HRP baseline (full universe)": {
+                "Sharpe (net)": m_hrp["sharpe_net"],
+                "Net return": m_hrp["expected_return_net"],
+                "Volatility": m_hrp["volatility"],
+                "Turnover": m_hrp["turnover"],
+                "Yield": m_hrp["portfolio_yield"],
+                "Max drawdown (sim)": max_drawdown(plan.hrp_benchmark_weights,
+                                                   md.returns),
+                "# positions": m_hrp["num_positions"],
+                "Hard breaches vs mandate": total_breaches(audit_hrp),
+            },
+        }).T
+        st.dataframe(cmp_df.style.format({
+            "Sharpe (net)": "{:.3f}", "Net return": "{:.2%}",
+            "Volatility": "{:.2%}", "Turnover": "{:.2f}", "Yield": "{:.2%}",
+            "Max drawdown (sim)": "{:.2%}", "# positions": "{:.0f}",
+            "Hard breaches vs mandate": "{:.0f}"}),
+            use_container_width=True)
+        st.caption(
+            "The HRP baseline diversifies across all N names — smooth risk, "
+            "but it structurally violates the K-name implementability "
+            "mandate (breach column). OMEGA delivers the mandated exactly-K "
+            "book at comparable risk-adjusted quality: that is the trade-off "
+            "the hybrid pipeline resolves.")
 
     st.divider()
     st.subheader("⚔️ Measured head-to-head vs competitor stack "

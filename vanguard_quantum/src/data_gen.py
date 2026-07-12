@@ -55,10 +55,12 @@ __all__ = ["MarketData", "generate_market_data"]
 
 TRADING_DAYS_PER_YEAR = 252
 
+# Multi-asset universe: labels are ASSET CLASSES per the challenge mandate
+# (the variable name `sectors` is kept across the API — read as class label).
 _SECTOR_POOL = [
-    "Technology", "Financials", "Healthcare", "Energy",
-    "Consumer", "Industrials", "Utilities", "Materials",
-    "Real Estate", "Telecom",
+    "US Equity", "Intl Equity", "EM Equity", "Govt Bonds",
+    "Corp Bonds", "High Yield", "Commodities", "REITs",
+    "Infrastructure", "Cash Equiv",
 ]
 
 
