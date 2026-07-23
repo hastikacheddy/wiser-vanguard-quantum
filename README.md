@@ -70,6 +70,41 @@ flowchart TD
     F --> G["Compliant portfolio<br/>0 breaches · exactly K names"]
 ```
 
+## The dashboard
+
+Screenshots below are live output from the **market-snapshot mode** — 41
+real multi-asset ETFs, loaded offline from the committed price panel. The
+same pipeline runs unchanged on the synthetic N = 100+ universe.
+
+### Allocation — final book, guardrail audit, and investor goals
+
+![Allocation tab](docs/screenshots/01-allocation.png)
+
+Twenty ETFs selected from 41 with **zero hard-guardrail breaches** and zero
+quantum fallbacks. Note the shape of the weights: eight positions sit exactly
+on the 10% cap and ten sit exactly on the 1% minimum-position floor — the
+constraints are visibly binding, and that floor is what keeps exactly twenty
+names in the book.
+
+### ADMM convergence — the classical/quantum handshake
+
+![ADMM convergence tab](docs/screenshots/02-admm-convergence.png)
+
+Recorded primal and dual residual trajectories from the run above (not
+illustrations), falling several orders of magnitude, alongside the adaptive-ρ
+trace showing the residual-balancing policy firing.
+
+### Hardware audit — measured heavy-hex compilation
+
+![Hardware audit tab](docs/screenshots/03-hardware-audit.png)
+
+Real transpiler runs onto an IBM heavy-hex coupling map. OMEGA's largest
+circuit needs **1,190** routed two-qubit gates; the penalty formulation's
+*required* monolithic circuit needs **3,952**, of which 2,312 are pure SWAP
+routing overhead. The matched-size row is reported too — at equal circuit
+size the penalty circuit is cheaper, because the advantage here is
+architectural (decomposability), not per-circuit.
+
 ## Projects
 
 ### 1. `vanguard_quantum` — Two-Phase Hybrid Pipeline

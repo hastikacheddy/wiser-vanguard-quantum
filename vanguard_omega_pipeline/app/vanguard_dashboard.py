@@ -17,6 +17,7 @@ Run with:  streamlit run app/vanguard_dashboard.py
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -56,7 +57,7 @@ st.sidebar.title("🛰️ OMEGA Controls")
 data_source = st.sidebar.radio(
     "Data source",
     ["Synthetic (seeded, verified)", "Market snapshot (41 ETFs, offline)"],
-    index=0,
+    index=int(os.environ.get("OMEGA_DEFAULT_SOURCE", "0")),
     help="Synthetic: controlled, reproducible verification universe. "
          "Snapshot: real multi-asset ETF closes (committed CSV, loaded "
          "offline — same pipeline, unchanged).")
